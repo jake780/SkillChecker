@@ -16,6 +16,7 @@ var selected_mode := "ring_duel"
 var status_message := "Offline"
 var player_profiles: Dictionary = {}
 var discovered_lobbies: Array[Dictionary] = []
+var network_match_active := false
 
 var peer: ENetMultiplayerPeer
 var discovery_socket: PacketPeerUDP
@@ -92,6 +93,7 @@ func join_discovered_lobby(index: int) -> void:
 	join_lobby(str(discovered_lobbies[index].get("address", "")))
 
 func close_lobby(message: String = "Offline") -> void:
+	network_match_active = false
 	if multiplayer.multiplayer_peer != null:
 		multiplayer.multiplayer_peer = null
 	if peer != null:
@@ -113,11 +115,24 @@ func is_hosting() -> bool:
 func is_connected_to_lobby() -> bool:
 	return multiplayer.multiplayer_peer != null
 
+func is_network_match() -> bool:
+	return network_match_active and multiplayer.multiplayer_peer != null
+
+func local_player_id() -> int:
+	if not is_network_match():
+		return 0
+	return 1 if multiplayer.get_unique_id() == 1 else 2
+
+func peer_player_id(peer_id: int) -> int:
+	if peer_id == 1:
+		return 1
+	return 2
+
 @rpc("any_peer", "reliable")
 func _submit_profile(display_name: String) -> void:
 	if not multiplayer.is_server():
 		return
-	var sender_id := multiplayer.get_remote_sender_id()
+	var sender_id: int = multiplayer.get_remote_sender_id()
 	player_profiles[str(sender_id)] = display_name.strip_edges()
 	_broadcast_lobby_state()
 
@@ -130,6 +145,7 @@ func _sync_lobby_state(profiles: Dictionary, mode_id: String) -> void:
 @rpc("authority", "call_local", "reliable")
 func _start_network_game(mode_id: String) -> void:
 	selected_mode = mode_id
+	network_match_active = true
 	network_game_requested.emit(mode_id)
 
 func _on_peer_connected(peer_id: int) -> void:

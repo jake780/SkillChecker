@@ -46,12 +46,24 @@ var round_pause_timer := 0.0
 var pending_round_message := ""
 var match_over := false
 var bounce_audio_cooldown := 0.0
+var local_player_id := 0
+var network_input_axes: Dictionary = {
+	1: Vector2.ZERO,
+	2: Vector2.ZERO
+}
+var network_send_timer := 0.0
+var network_sync_timer := 0.0
 
 func _ready() -> void:
 	InputConfig.ensure_default_actions()
+	local_player_id = NetworkManager.local_player_id()
 	reset_match()
 
 func _process(delta: float) -> void:
+	if NetworkManager.is_network_match():
+		_process_network(delta)
+		return
+
 	if match_over:
 		_update_particles(delta)
 		queue_redraw()
@@ -80,8 +92,49 @@ func _process(delta: float) -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if match_over and event.is_action_pressed("restart_round"):
-		reset_match()
+		if NetworkManager.is_network_match():
+			if NetworkManager.is_hosting():
+				reset_match()
+			else:
+				_request_pong_restart.rpc_id(1)
+		else:
+			reset_match()
 		get_viewport().set_input_as_handled()
+
+func _process_network(delta: float) -> void:
+	if NetworkManager.is_hosting():
+		if match_over:
+			_update_particles(delta)
+			_sync_pong_state_if_ready(delta)
+			queue_redraw()
+			return
+		if round_pause_timer > 0.0:
+			round_pause_timer -= delta
+			_update_particles(delta)
+			message_timer = maxf(message_timer - delta, 0.0)
+			if round_pause_timer <= 0.0:
+				_start_round(pending_round_message)
+				audio.play_round_start()
+			_sync_pong_state_if_ready(delta)
+			queue_redraw()
+		return
+
+		network_input_axes[1] = _local_axis_for_player(1)
+		_update_paddles_with_axes(delta, _network_axis_for_player(1), _network_axis_for_player(2))
+		_update_balls(delta)
+		bounce_audio_cooldown = maxf(bounce_audio_cooldown - delta, 0.0)
+		if not match_over:
+			_update_spawning(delta)
+		_update_particles(delta)
+		message_timer = maxf(message_timer - delta, 0.0)
+		_sync_pong_state_if_ready(delta)
+	else:
+		network_send_timer -= delta
+		if network_send_timer <= 0.0:
+			_submit_pong_axis.rpc_id(1, _local_axis_for_player(local_player_id))
+			network_send_timer = 1.0 / 30.0
+		_update_particles(delta)
+	queue_redraw()
 
 func reset_match() -> void:
 	p1_rounds = 0
@@ -109,17 +162,25 @@ func _start_round(message: String) -> void:
 	pending_round_message = ""
 
 func _update_paddles(delta: float) -> void:
+	_update_paddles_with_axes(delta, _local_axis_for_player(1), _local_axis_for_player(2))
+
+func _local_axis_for_player(player_id: int) -> Vector2:
+	var prefix := "p1" if player_id == 1 else "p2"
+	return Vector2(
+		Input.get_action_strength("%s_right" % prefix) - Input.get_action_strength("%s_left" % prefix),
+		Input.get_action_strength("%s_down" % prefix) - Input.get_action_strength("%s_up" % prefix)
+	)
+
+func _network_axis_for_player(player_id: int) -> Vector2:
+	var axis: Variant = network_input_axes.get(player_id, Vector2.ZERO)
+	if axis is Vector2:
+		return axis
+	return Vector2.ZERO
+
+func _update_paddles_with_axes(delta: float, p1_axis: Vector2, p2_axis: Vector2) -> void:
 	var viewport_size := get_viewport_rect().size
 	p1_previous_position = p1_position
 	p2_previous_position = p2_position
-	var p1_axis := Vector2(
-		Input.get_action_strength("p1_right") - Input.get_action_strength("p1_left"),
-		Input.get_action_strength("p1_down") - Input.get_action_strength("p1_up")
-	)
-	var p2_axis := Vector2(
-		Input.get_action_strength("p2_right") - Input.get_action_strength("p2_left"),
-		Input.get_action_strength("p2_down") - Input.get_action_strength("p2_up")
-	)
 	p1_velocity = _paddle_velocity_for_input(p1_velocity, p1_axis, delta)
 	p2_velocity = _paddle_velocity_for_input(p2_velocity, p2_axis, delta)
 
@@ -284,6 +345,75 @@ func _play_bounce_audio(label: String) -> void:
 		return
 	bounce_audio_cooldown = 0.035
 	audio.play_catch(label)
+
+func _sync_pong_state_if_ready(delta: float) -> void:
+	network_sync_timer -= delta
+	if network_sync_timer > 0.0:
+		return
+	_sync_pong_state.rpc(_pong_state())
+	network_sync_timer = 1.0 / 20.0
+
+func _pong_state() -> Dictionary:
+	return {
+		"p1_position": p1_position,
+		"p2_position": p2_position,
+		"p1_velocity": p1_velocity,
+		"p2_velocity": p2_velocity,
+		"p1_rounds": p1_rounds,
+		"p2_rounds": p2_rounds,
+		"p1_leds": p1_leds,
+		"p2_leds": p2_leds,
+		"balls": balls,
+		"round_message": round_message,
+		"message_timer": message_timer,
+		"round_pause_timer": round_pause_timer,
+		"pending_round_message": pending_round_message,
+		"match_over": match_over
+	}
+
+func _apply_pong_state(state: Dictionary) -> void:
+	var new_p1_position: Variant = state.get("p1_position", p1_position)
+	var new_p2_position: Variant = state.get("p2_position", p2_position)
+	var new_p1_velocity: Variant = state.get("p1_velocity", p1_velocity)
+	var new_p2_velocity: Variant = state.get("p2_velocity", p2_velocity)
+	if new_p1_position is Vector2:
+		p1_position = new_p1_position
+	if new_p2_position is Vector2:
+		p2_position = new_p2_position
+	if new_p1_velocity is Vector2:
+		p1_velocity = new_p1_velocity
+	if new_p2_velocity is Vector2:
+		p2_velocity = new_p2_velocity
+	p1_rounds = int(state.get("p1_rounds", p1_rounds))
+	p2_rounds = int(state.get("p2_rounds", p2_rounds))
+	p1_leds = int(state.get("p1_leds", p1_leds))
+	p2_leds = int(state.get("p2_leds", p2_leds))
+	var new_balls: Variant = state.get("balls", balls)
+	if new_balls is Array:
+		balls.assign(new_balls)
+	round_message = str(state.get("round_message", round_message))
+	message_timer = float(state.get("message_timer", message_timer))
+	round_pause_timer = float(state.get("round_pause_timer", round_pause_timer))
+	pending_round_message = str(state.get("pending_round_message", pending_round_message))
+	match_over = bool(state.get("match_over", match_over))
+
+@rpc("any_peer", "unreliable")
+func _submit_pong_axis(axis: Vector2) -> void:
+	if not NetworkManager.is_hosting():
+		return
+	var player_id: int = NetworkManager.peer_player_id(multiplayer.get_remote_sender_id())
+	network_input_axes[player_id] = axis
+
+@rpc("any_peer", "reliable")
+func _request_pong_restart() -> void:
+	if NetworkManager.is_hosting() and match_over:
+		reset_match()
+
+@rpc("authority", "unreliable")
+func _sync_pong_state(state: Dictionary) -> void:
+	if NetworkManager.is_hosting():
+		return
+	_apply_pong_state(state)
 
 func _score_led(player_id: int, position: Vector2) -> bool:
 	if player_id == 1:

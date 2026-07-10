@@ -17,9 +17,12 @@ var round_time := 0.0
 var sudden_death_started := false
 var impact_particles: Array[Dictionary] = []
 var projectile_particles: Array[Dictionary] = []
+var local_player_id := 0
+var network_sync_timer := 0.0
 
 func _ready() -> void:
 	InputConfig.ensure_default_actions()
+	local_player_id = NetworkManager.local_player_id()
 	players = [
 		PlayerDuelState.new(1, "PLAYER 1", Color(0.15, 0.65, 1.0), "p1_catch"),
 		PlayerDuelState.new(2, "PLAYER 2", Color(1.0, 0.22, 0.55), "p2_catch")
@@ -28,6 +31,12 @@ func _ready() -> void:
 	reset_match()
 
 func _process(delta: float) -> void:
+	if NetworkManager.is_network_match() and not NetworkManager.is_hosting():
+		_update_projectile_particles(delta)
+		_update_impact_particles(delta)
+		queue_redraw()
+		return
+
 	for player in players:
 		player.tick(delta)
 
@@ -53,15 +62,31 @@ func _process(delta: float) -> void:
 	shake_timer = maxf(shake_timer - delta, 0.0)
 	_update_projectile_particles(delta)
 	_update_impact_particles(delta)
+	if NetworkManager.is_network_match() and NetworkManager.is_hosting():
+		_sync_duel_state_if_ready(delta)
 	queue_redraw()
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("restart_round"):
-		reset_match()
+		if NetworkManager.is_network_match() and not NetworkManager.is_hosting():
+			_request_duel_restart.rpc_id(1)
+		else:
+			reset_match()
 		get_viewport().set_input_as_handled()
 		return
 
 	if not round_active:
+		return
+
+	if NetworkManager.is_network_match():
+		var player_id := NetworkManager.local_player_id()
+		var action := "p1_catch" if player_id == 1 else "p2_catch"
+		if event.is_action_pressed(action):
+			if NetworkManager.is_hosting():
+				_resolve_network_catch(player_id)
+			else:
+				_submit_duel_catch.rpc_id(1)
+			get_viewport().set_input_as_handled()
 		return
 
 	for player in players:
@@ -122,6 +147,15 @@ func _try_auto_attack(player: PlayerDuelState) -> void:
 		_check_round_winner()
 	else:
 		audio.play_no_charge()
+
+func _resolve_network_catch(player_id: int) -> void:
+	if not round_active:
+		return
+	var player := _player_by_id(player_id)
+	if player == null:
+		return
+	var result := ring.resolve_catch(player_id)
+	_apply_catch_result(player, result)
 
 func _check_round_winner() -> void:
 	for player in players:
@@ -215,6 +249,87 @@ func _player_by_id(player_id: int) -> PlayerDuelState:
 		if player.id == player_id:
 			return player
 	return null
+
+func _sync_duel_state_if_ready(delta: float) -> void:
+	network_sync_timer -= delta
+	if network_sync_timer > 0.0:
+		return
+	_sync_duel_state.rpc(_duel_state())
+	network_sync_timer = 1.0 / 20.0
+
+func _duel_state() -> Dictionary:
+	return {
+		"players": [_player_state(players[0]), _player_state(players[1])],
+		"round_active": round_active,
+		"round_over": round_over,
+		"countdown": countdown,
+		"match_message": match_message,
+		"message_timer": message_timer,
+		"round_time": round_time,
+		"sudden_death_started": sudden_death_started,
+		"ring_spinner_degrees": ring.spinner_degrees,
+		"ring_current_speed": ring.current_speed,
+		"ring_spin_direction": ring.spin_direction,
+		"ring_pulse_timer": ring.pulse_timer,
+		"ring_sudden_death": ring.sudden_death,
+		"ring_victory_flash": ring.victory_flash
+	}
+
+func _player_state(player: PlayerDuelState) -> Dictionary:
+	return {
+		"health": player.health,
+		"charge": player.charge,
+		"score": player.score,
+		"last_result": player.last_result,
+		"flash_timer": player.flash_timer
+	}
+
+func _apply_duel_state(state: Dictionary) -> void:
+	var player_states: Variant = state.get("players", [])
+	if player_states is Array:
+		for i in range(mini(players.size(), player_states.size())):
+			var player_state: Variant = player_states[i]
+			if player_state is Dictionary:
+				var typed_player_state: Dictionary = player_state
+				_apply_player_state(players[i], typed_player_state)
+	round_active = bool(state.get("round_active", round_active))
+	round_over = bool(state.get("round_over", round_over))
+	countdown = float(state.get("countdown", countdown))
+	match_message = str(state.get("match_message", match_message))
+	message_timer = float(state.get("message_timer", message_timer))
+	round_time = float(state.get("round_time", round_time))
+	sudden_death_started = bool(state.get("sudden_death_started", sudden_death_started))
+	ring.spinner_degrees = float(state.get("ring_spinner_degrees", ring.spinner_degrees))
+	ring.current_speed = float(state.get("ring_current_speed", ring.current_speed))
+	ring.spin_direction = float(state.get("ring_spin_direction", ring.spin_direction))
+	ring.pulse_timer = float(state.get("ring_pulse_timer", ring.pulse_timer))
+	ring.sudden_death = bool(state.get("ring_sudden_death", ring.sudden_death))
+	ring.victory_flash = bool(state.get("ring_victory_flash", ring.victory_flash))
+
+func _apply_player_state(player: PlayerDuelState, state: Dictionary) -> void:
+	player.health = float(state.get("health", player.health))
+	player.charge = float(state.get("charge", player.charge))
+	player.score = int(state.get("score", player.score))
+	player.last_result = str(state.get("last_result", player.last_result))
+	player.flash_timer = float(state.get("flash_timer", player.flash_timer))
+
+@rpc("any_peer", "reliable")
+func _submit_duel_catch() -> void:
+	if not NetworkManager.is_hosting():
+		return
+	var player_id: int = NetworkManager.peer_player_id(multiplayer.get_remote_sender_id())
+	_resolve_network_catch(player_id)
+
+@rpc("any_peer", "reliable")
+func _request_duel_restart() -> void:
+	if NetworkManager.is_hosting() and round_over:
+		reset_match()
+
+@rpc("authority", "unreliable")
+func _sync_duel_state(state: Dictionary) -> void:
+	if NetworkManager.is_hosting():
+		return
+	_apply_duel_state(state)
 
 func _draw() -> void:
 	if players.size() < 2:
