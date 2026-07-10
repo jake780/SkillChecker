@@ -1,0 +1,10 @@
+[gd_scene load_steps=3 format=3 uid="uid://led_pong_arena"]
+
+[ext_resource type="Script" path="res://scripts/pong/LEDPongArena.gd" id="1_pong"]
+[ext_resource type="Script" path="res://scripts/audio/AudioController.gd" id="2_audio"]
+
+[node name="LEDPongArena" type="Node2D"]
+script = ExtResource("1_pong")
+
+[node name="AudioController" type="Node" parent="."]
+script = ExtResource("2_audio")

@@ -1,0 +1,15 @@
+[gd_scene load_steps=4 format=3 uid="uid://duel_arena"]
+
+[ext_resource type="Script" path="res://scripts/round/RoundManager.gd" id="1_round"]
+[ext_resource type="Script" path="res://scripts/ring/RingController.gd" id="2_ring"]
+[ext_resource type="Script" path="res://scripts/audio/AudioController.gd" id="3_audio"]
+
+[node name="DuelArena" type="Node2D"]
+script = ExtResource("1_round")
+
+[node name="RingController" type="Node2D" parent="."]
+position = Vector2(640, 360)
+script = ExtResource("2_ring")
+
+[node name="AudioController" type="Node" parent="."]
+script = ExtResource("3_audio")
