@@ -46,6 +46,7 @@ var round_pause_timer := 0.0
 var pending_round_message := ""
 var match_over := false
 var bounce_audio_cooldown := 0.0
+var bounce_network_cooldown := 0.0
 var local_player_id := 0
 var network_input_axes: Dictionary = {
 	1: Vector2.ZERO,
@@ -81,6 +82,7 @@ func _process(delta: float) -> void:
 	_update_paddles(delta)
 	_update_balls(delta)
 	bounce_audio_cooldown = maxf(bounce_audio_cooldown - delta, 0.0)
+	bounce_network_cooldown = maxf(bounce_network_cooldown - delta, 0.0)
 	if match_over:
 		_update_particles(delta)
 		queue_redraw()
@@ -123,6 +125,7 @@ func _process_network(delta: float) -> void:
 		_update_paddles_with_axes(delta, _network_axis_for_player(1), _network_axis_for_player(2))
 		_update_balls(delta)
 		bounce_audio_cooldown = maxf(bounce_audio_cooldown - delta, 0.0)
+		bounce_network_cooldown = maxf(bounce_network_cooldown - delta, 0.0)
 		if not match_over:
 			_update_spawning(delta)
 		_update_particles(delta)
@@ -133,7 +136,9 @@ func _process_network(delta: float) -> void:
 		if network_send_timer <= 0.0:
 			_submit_pong_axis.rpc_id(1, _local_axis_for_player(local_player_id))
 			network_send_timer = 1.0 / 30.0
+		_predict_client_visuals(delta)
 		_update_particles(delta)
+		bounce_network_cooldown = maxf(bounce_network_cooldown - delta, 0.0)
 	queue_redraw()
 
 func reset_match() -> void:
@@ -165,7 +170,9 @@ func _update_paddles(delta: float) -> void:
 	_update_paddles_with_axes(delta, _local_axis_for_player(1), _local_axis_for_player(2))
 
 func _local_axis_for_player(player_id: int) -> Vector2:
-	var prefix := "p1" if player_id == 1 else "p2"
+	var prefix := "p1"
+	if not NetworkManager.is_network_match():
+		prefix = "p1" if player_id == 1 else "p2"
 	return Vector2(
 		Input.get_action_strength("%s_right" % prefix) - Input.get_action_strength("%s_left" % prefix),
 		Input.get_action_strength("%s_down" % prefix) - Input.get_action_strength("%s_up" % prefix)
@@ -197,6 +204,52 @@ func _update_paddles_with_axes(delta: float, p1_axis: Vector2, p2_axis: Vector2)
 	p2_position = _clamp_paddle_position(p2_position + p2_velocity * delta, p2_min_x, p2_max_x, min_y, max_y)
 	p1_velocity = _stop_blocked_velocity(p1_position, p1_velocity, p1_min_x, p1_max_x, min_y, max_y)
 	p2_velocity = _stop_blocked_velocity(p2_position, p2_velocity, p2_min_x, p2_max_x, min_y, max_y)
+
+func _predict_client_visuals(delta: float) -> void:
+	_predict_local_paddle(delta)
+	_advance_client_balls(delta)
+
+func _predict_local_paddle(delta: float) -> void:
+	if local_player_id == 0:
+		return
+	var viewport_size := get_viewport_rect().size
+	var paddle_radius := _paddle_bounds_radius()
+	var half_paddle_height := PADDLE_HEIGHT * 0.5
+	var min_y := WALL_TOP + WALL_THICKNESS * 0.5 + half_paddle_height
+	var max_y := viewport_size.y - WALL_BOTTOM_MARGIN - WALL_THICKNESS * 0.5 - half_paddle_height
+	var axis := _local_axis_for_player(local_player_id)
+	if local_player_id == 1:
+		var p1_min_x := paddle_radius
+		var p1_max_x := _left_barrier_x(viewport_size) - paddle_radius
+		p1_velocity = _paddle_velocity_for_input(p1_velocity, axis, delta)
+		p1_position = _clamp_paddle_position(p1_position + p1_velocity * delta, p1_min_x, p1_max_x, min_y, max_y)
+		p1_velocity = _stop_blocked_velocity(p1_position, p1_velocity, p1_min_x, p1_max_x, min_y, max_y)
+	else:
+		var p2_min_x := _right_barrier_x(viewport_size) + paddle_radius
+		var p2_max_x := viewport_size.x - paddle_radius
+		p2_velocity = _paddle_velocity_for_input(p2_velocity, axis, delta)
+		p2_position = _clamp_paddle_position(p2_position + p2_velocity * delta, p2_min_x, p2_max_x, min_y, max_y)
+		p2_velocity = _stop_blocked_velocity(p2_position, p2_velocity, p2_min_x, p2_max_x, min_y, max_y)
+
+func _advance_client_balls(delta: float) -> void:
+	var viewport_size := get_viewport_rect().size
+	for ball in balls:
+		var position_value: Variant = ball.get("position", Vector2.ZERO)
+		var velocity_value: Variant = ball.get("velocity", Vector2.ZERO)
+		if not position_value is Vector2 or not velocity_value is Vector2:
+			continue
+		var position: Vector2 = position_value
+		var velocity: Vector2 = velocity_value
+		var radius := float(ball.get("radius", BALL_RADIUS))
+		position += velocity * delta
+		if position.y - radius <= WALL_TOP:
+			position.y = WALL_TOP + radius
+			velocity.y = absf(velocity.y)
+		elif position.y + radius >= viewport_size.y - WALL_BOTTOM_MARGIN:
+			position.y = viewport_size.y - WALL_BOTTOM_MARGIN - radius
+			velocity.y = -absf(velocity.y)
+		ball["position"] = position
+		ball["velocity"] = velocity
 
 func _paddle_velocity_for_input(current_velocity: Vector2, axis: Vector2, delta: float) -> Vector2:
 	if axis.length_squared() > 0.01:
@@ -256,9 +309,15 @@ func _update_balls(delta: float) -> void:
 	var p2_swept_rect := _swept_paddle_rect(p2_previous_position, p2_position)
 
 	for ball in balls:
-		var position: Vector2 = ball["position"]
-		var velocity: Vector2 = ball["velocity"]
-		var radius: float = ball["radius"]
+		var position_value: Variant = ball.get("position", Vector2.ZERO)
+		var velocity_value: Variant = ball.get("velocity", Vector2.ZERO)
+		var color_value: Variant = ball.get("color", Color.WHITE)
+		if not position_value is Vector2 or not velocity_value is Vector2 or not color_value is Color:
+			continue
+		var position: Vector2 = position_value
+		var velocity: Vector2 = velocity_value
+		var radius := float(ball.get("radius", BALL_RADIUS))
+		var ball_color: Color = color_value
 		ball["p1_hit_cooldown"] = maxf(float(ball.get("p1_hit_cooldown", 0.0)) - delta, 0.0)
 		ball["p2_hit_cooldown"] = maxf(float(ball.get("p2_hit_cooldown", 0.0)) - delta, 0.0)
 		var step_count := clampi(int(ceil(velocity.length() * delta / maxf(radius * 0.9, 1.0))), 1, MAX_BALL_SUBSTEPS)
@@ -270,51 +329,62 @@ func _update_balls(delta: float) -> void:
 			if position.y - radius <= WALL_TOP:
 				position.y = WALL_TOP + radius
 				velocity.y = absf(velocity.y)
-				_spawn_bounce_particles(position, ball["color"])
-				_play_bounce_audio("GOOD")
+				_emit_bounce_effect(position, ball_color, "GOOD")
 			elif position.y + radius >= viewport_size.y - WALL_BOTTOM_MARGIN:
 				position.y = viewport_size.y - WALL_BOTTOM_MARGIN - radius
 				velocity.y = -absf(velocity.y)
-				_spawn_bounce_particles(position, ball["color"])
-				_play_bounce_audio("GOOD")
+				_emit_bounce_effect(position, ball_color, "GOOD")
 
 			var p1_hit := _paddle_hit_info(position, radius, p1_rect, p1_swept_rect)
-			var p1_normal: Vector2 = p1_hit.get("normal", Vector2.ZERO)
+			var p1_normal_value: Variant = p1_hit.get("normal", Vector2.ZERO)
+			var p1_normal := Vector2.ZERO
+			if p1_normal_value is Vector2:
+				p1_normal = p1_normal_value
 			if float(ball["p1_hit_cooldown"]) <= 0.0 and bool(p1_hit["hit"]) and _is_moving_into_paddle(velocity, p1_velocity, p1_normal):
 				position = position + p1_normal * float(p1_hit["depth"])
 				velocity = _paddle_bounce_velocity(velocity, p1_velocity, p1_normal, float(p1_hit["hit_factor"]))
 				ball["p1_hit_cooldown"] = 0.09
 				ball["p2_hit_cooldown"] = 0.035
 				velocity *= 1.035
-				_spawn_bounce_particles(position, Color(0.15, 0.65, 1.0))
-				_play_bounce_audio("PERFECT")
+				_emit_bounce_effect(position, Color(0.15, 0.65, 1.0), "PERFECT")
 			else:
 				var p2_hit := _paddle_hit_info(position, radius, p2_rect, p2_swept_rect)
-				var p2_normal: Vector2 = p2_hit.get("normal", Vector2.ZERO)
+				var p2_normal_value: Variant = p2_hit.get("normal", Vector2.ZERO)
+				var p2_normal := Vector2.ZERO
+				if p2_normal_value is Vector2:
+					p2_normal = p2_normal_value
 				if float(ball["p2_hit_cooldown"]) <= 0.0 and bool(p2_hit["hit"]) and _is_moving_into_paddle(velocity, p2_velocity, p2_normal):
 					position = position + p2_normal * float(p2_hit["depth"])
 					velocity = _paddle_bounce_velocity(velocity, p2_velocity, p2_normal, float(p2_hit["hit_factor"]))
 					ball["p2_hit_cooldown"] = 0.09
 					ball["p1_hit_cooldown"] = 0.035
 					velocity *= 1.035
-					_spawn_bounce_particles(position, Color(1.0, 0.22, 0.55))
-					_play_bounce_audio("PERFECT")
+					_emit_bounce_effect(position, Color(1.0, 0.22, 0.55), "PERFECT")
 
 		ball["position"] = position
 		ball["velocity"] = velocity
 
 	var round_ended := false
 	var scored_balls := balls.filter(func(ball: Dictionary) -> bool:
-		var position: Vector2 = ball["position"]
+		var position_value: Variant = ball.get("position", Vector2.ZERO)
+		if not position_value is Vector2:
+			return false
+		var position: Vector2 = position_value
 		return position.x < -40.0 or position.x > viewport_size.x + 40.0
 	)
 	var balls_after_score := balls.filter(func(ball: Dictionary) -> bool:
-		var position: Vector2 = ball["position"]
+		var position_value: Variant = ball.get("position", Vector2.ZERO)
+		if not position_value is Vector2:
+			return false
+		var position: Vector2 = position_value
 		return position.x >= -40.0 and position.x <= viewport_size.x + 40.0
 	)
 	for scored_ball in scored_balls:
 		balls = balls_after_score
-		var scored_position: Vector2 = scored_ball["position"]
+		var scored_position_value: Variant = scored_ball.get("position", Vector2.ZERO)
+		if not scored_position_value is Vector2:
+			continue
+		var scored_position: Vector2 = scored_position_value
 		if scored_position.x < 0.0:
 			round_ended = _score_led(2, scored_position)
 		else:
@@ -346,6 +416,13 @@ func _play_bounce_audio(label: String) -> void:
 	bounce_audio_cooldown = 0.035
 	audio.play_catch(label)
 
+func _emit_bounce_effect(position: Vector2, color: Color, label: String) -> void:
+	_spawn_bounce_particles(position, color)
+	_play_bounce_audio(label)
+	if NetworkManager.is_network_match() and NetworkManager.is_hosting() and bounce_network_cooldown <= 0.0:
+		bounce_network_cooldown = 0.04
+		_play_pong_bounce_effect.rpc(position, color, label)
+
 func _sync_pong_state_if_ready(delta: float) -> void:
 	network_sync_timer -= delta
 	if network_sync_timer > 0.0:
@@ -363,13 +440,25 @@ func _pong_state() -> Dictionary:
 		"p2_rounds": p2_rounds,
 		"p1_leds": p1_leds,
 		"p2_leds": p2_leds,
-		"balls": balls,
+		"balls": _packed_balls(),
 		"round_message": round_message,
 		"message_timer": message_timer,
 		"round_pause_timer": round_pause_timer,
 		"pending_round_message": pending_round_message,
 		"match_over": match_over
 	}
+
+func _packed_balls() -> Array:
+	var packed_balls: Array = []
+	for ball in balls:
+		packed_balls.append([
+			ball["position"],
+			ball["velocity"],
+			ball["color"],
+			ball["radius"],
+			ball["spin"]
+		])
+	return packed_balls
 
 func _apply_pong_state(state: Dictionary) -> void:
 	var new_p1_position: Variant = state.get("p1_position", p1_position)
@@ -390,12 +479,42 @@ func _apply_pong_state(state: Dictionary) -> void:
 	p2_leds = int(state.get("p2_leds", p2_leds))
 	var new_balls: Variant = state.get("balls", balls)
 	if new_balls is Array:
-		balls.assign(new_balls)
+		_apply_packed_balls(new_balls)
 	round_message = str(state.get("round_message", round_message))
 	message_timer = float(state.get("message_timer", message_timer))
 	round_pause_timer = float(state.get("round_pause_timer", round_pause_timer))
 	pending_round_message = str(state.get("pending_round_message", pending_round_message))
 	match_over = bool(state.get("match_over", match_over))
+
+func _apply_packed_balls(packed_balls: Array) -> void:
+	var updated_balls: Array[Dictionary] = []
+	for i in range(packed_balls.size()):
+		var packed_ball: Variant = packed_balls[i]
+		if not packed_ball is Array:
+			continue
+		var ball_data: Array = packed_ball as Array
+		if ball_data.size() < 5:
+			continue
+		var position_value: Variant = ball_data[0]
+		var velocity_value: Variant = ball_data[1]
+		var color_value: Variant = ball_data[2]
+		if not position_value is Vector2 or not velocity_value is Vector2 or not color_value is Color:
+			continue
+		var p1_cooldown := 0.0
+		var p2_cooldown := 0.0
+		if i < balls.size():
+			p1_cooldown = float(balls[i].get("p1_hit_cooldown", 0.0))
+			p2_cooldown = float(balls[i].get("p2_hit_cooldown", 0.0))
+		updated_balls.append({
+			"position": position_value,
+			"velocity": velocity_value,
+			"color": color_value,
+			"radius": float(ball_data[3]),
+			"spin": float(ball_data[4]),
+			"p1_hit_cooldown": p1_cooldown,
+			"p2_hit_cooldown": p2_cooldown
+		})
+	balls = updated_balls
 
 @rpc("any_peer", "unreliable")
 func _submit_pong_axis(axis: Vector2) -> void:
@@ -415,17 +534,35 @@ func _sync_pong_state(state: Dictionary) -> void:
 		return
 	_apply_pong_state(state)
 
+@rpc("authority", "unreliable")
+func _play_pong_bounce_effect(position: Vector2, color: Color, label: String) -> void:
+	if NetworkManager.is_hosting():
+		return
+	_spawn_bounce_particles(position, color)
+	_play_bounce_audio(label)
+
 func _score_led(player_id: int, position: Vector2) -> bool:
 	if player_id == 1:
 		p1_leds += 1
 		round_message = "P1 LED"
-		_spawn_score_particles(position, Color(0.15, 0.65, 1.0))
+		_emit_score_effect(position, Color(0.15, 0.65, 1.0))
 	else:
 		p2_leds += 1
 		round_message = "P2 LED"
-		_spawn_score_particles(position, Color(1.0, 0.22, 0.55))
+		_emit_score_effect(position, Color(1.0, 0.22, 0.55))
 	message_timer = 0.45
 	return _check_round_end()
+
+func _emit_score_effect(position: Vector2, color: Color) -> void:
+	_spawn_score_particles(position, color)
+	if NetworkManager.is_network_match() and NetworkManager.is_hosting():
+		_play_pong_score_effect.rpc(position, color)
+
+@rpc("authority", "reliable")
+func _play_pong_score_effect(position: Vector2, color: Color) -> void:
+	if NetworkManager.is_hosting():
+		return
+	_spawn_score_particles(position, color)
 
 func _check_round_end() -> bool:
 	if p1_leds < ROUND_TARGET and p2_leds < ROUND_TARGET:
@@ -453,6 +590,18 @@ func _start_round_pause(winner_id: int) -> void:
 	message_timer = 2.0
 	pending_round_message = round_message
 	balls.clear()
+	_emit_round_win_effect(winner_id)
+	audio.play_win()
+
+func _emit_round_win_effect(winner_id: int) -> void:
+	_spawn_round_win_particles(winner_id)
+	if NetworkManager.is_network_match() and NetworkManager.is_hosting():
+		_play_pong_round_win_effect.rpc(winner_id)
+
+@rpc("authority", "reliable")
+func _play_pong_round_win_effect(winner_id: int) -> void:
+	if NetworkManager.is_hosting():
+		return
 	_spawn_round_win_particles(winner_id)
 	audio.play_win()
 
@@ -679,24 +828,36 @@ func _draw_rounded_rect_fill(rect: Rect2, color: Color, radius: float) -> void:
 
 func _draw_balls() -> void:
 	for ball in balls:
-		var position: Vector2 = ball["position"]
-		var color: Color = ball["color"]
-		var radius: float = ball["radius"]
+		var position_value: Variant = ball.get("position", Vector2.ZERO)
+		var color_value: Variant = ball.get("color", Color.WHITE)
+		if not position_value is Vector2 or not color_value is Color:
+			continue
+		var position: Vector2 = position_value
+		var color: Color = color_value
+		var radius := float(ball.get("radius", BALL_RADIUS))
 		draw_circle(position, radius, color)
 		draw_circle(position, radius * 1.18, Color(color.r, color.g, color.b, 0.08))
 
 func _draw_particles() -> void:
 	for particle in impact_particles:
 		var progress := float(particle["life"]) / float(particle["ttl"])
-		var color: Color = particle["color"]
-		var position: Vector2 = particle["position"]
-		var radius: float = particle["radius"]
+		var color_value: Variant = particle.get("color", Color.WHITE)
+		var position_value: Variant = particle.get("position", Vector2.ZERO)
+		if not color_value is Color or not position_value is Vector2:
+			continue
+		var color: Color = color_value
+		var position: Vector2 = position_value
+		var radius := float(particle.get("radius", 2.0))
 		draw_circle(position, radius * (1.0 - progress), Color(color.r, color.g, color.b, 1.0 - progress))
 
 func _draw_controls() -> void:
 	var font := ThemeDB.get_fallback_font()
 	var viewport_size := get_viewport_rect().size
 	var y := viewport_size.y - 12.0
+	if NetworkManager.is_network_match():
+		var local_text := "YOU: %s/%s/%s/%s" % [InputConfig.action_label("p1_up"), InputConfig.action_label("p1_left"), InputConfig.action_label("p1_down"), InputConfig.action_label("p1_right")]
+		draw_string(font, Vector2(56.0, y), local_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.82, 0.9, 1.0))
+		return
 	draw_string(font, Vector2(56.0, y), "P1: %s/%s/%s/%s" % [InputConfig.action_label("p1_up"), InputConfig.action_label("p1_left"), InputConfig.action_label("p1_down"), InputConfig.action_label("p1_right")], HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.15, 0.65, 1.0))
 	var p2_text := "P2: %s/%s/%s/%s" % [InputConfig.action_label("p2_up"), InputConfig.action_label("p2_left"), InputConfig.action_label("p2_down"), InputConfig.action_label("p2_right")]
 	var p2_width := font.get_string_size(p2_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 18).x

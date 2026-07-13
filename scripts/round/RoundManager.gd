@@ -80,7 +80,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if NetworkManager.is_network_match():
 		var player_id := NetworkManager.local_player_id()
-		var action := "p1_catch" if player_id == 1 else "p2_catch"
+		var action := "p1_catch"
 		if event.is_action_pressed(action):
 			if NetworkManager.is_hosting():
 				_resolve_network_catch(player_id)
@@ -114,10 +114,12 @@ func reset_match() -> void:
 
 func _on_catch_resolved(player_id: int, result: Dictionary) -> void:
 	var player := _player_by_id(player_id)
-	var color := player.color if player else Color.WHITE
+	var color: Color = player.color if player else Color.WHITE
 	ring.show_feedback(result["label"], color)
 	ring.spawn_hit_particles(player_id, result["label"], color)
 	audio.play_catch(result["label"])
+	if NetworkManager.is_network_match() and NetworkManager.is_hosting():
+		_play_duel_catch_effect.rpc(player_id, str(result["label"]))
 
 func _apply_catch_result(player: PlayerDuelState, result: Dictionary) -> void:
 	player.set_result(result["label"])
@@ -143,6 +145,8 @@ func _try_auto_attack(player: PlayerDuelState) -> void:
 		audio.play_attack(outcome["heavy"])
 		_spawn_projectile_particles(player, defender)
 		_spawn_damage_particles(defender, outcome["heavy"], player.color)
+		if NetworkManager.is_network_match() and NetworkManager.is_hosting():
+			_play_duel_attack_effect.rpc(player.id, defender.id, bool(outcome["heavy"]))
 		_pulse_screen(0.35, 18.0)
 		_check_round_winner()
 	else:
@@ -170,6 +174,8 @@ func _check_round_winner() -> void:
 			ring.set_victory_flash(true)
 			ring.start_victory_celebration(winner.color)
 			audio.play_win()
+			if NetworkManager.is_network_match() and NetworkManager.is_hosting():
+				_play_duel_win_effect.rpc(winner.id)
 
 func _show_message(message: String) -> void:
 	match_message = message
@@ -312,6 +318,39 @@ func _apply_player_state(player: PlayerDuelState, state: Dictionary) -> void:
 	player.score = int(state.get("score", player.score))
 	player.last_result = str(state.get("last_result", player.last_result))
 	player.flash_timer = float(state.get("flash_timer", player.flash_timer))
+
+@rpc("authority", "reliable")
+func _play_duel_catch_effect(player_id: int, label: String) -> void:
+	if NetworkManager.is_hosting():
+		return
+	var player := _player_by_id(player_id)
+	var color: Color = player.color if player else Color.WHITE
+	ring.show_feedback(label, color)
+	ring.spawn_hit_particles(player_id, label, color)
+	audio.play_catch(label)
+
+@rpc("authority", "reliable")
+func _play_duel_attack_effect(attacker_id: int, defender_id: int, heavy: bool) -> void:
+	if NetworkManager.is_hosting():
+		return
+	var attacker := _player_by_id(attacker_id)
+	var defender := _player_by_id(defender_id)
+	if attacker == null or defender == null:
+		return
+	audio.play_attack(heavy)
+	_spawn_projectile_particles(attacker, defender)
+	_spawn_damage_particles(defender, heavy, attacker.color)
+	_pulse_screen(0.35, 18.0)
+
+@rpc("authority", "reliable")
+func _play_duel_win_effect(winner_id: int) -> void:
+	if NetworkManager.is_hosting():
+		return
+	var winner := _player_by_id(winner_id)
+	if winner == null:
+		return
+	ring.start_victory_celebration(winner.color)
+	audio.play_win()
 
 @rpc("any_peer", "reliable")
 func _submit_duel_catch() -> void:
@@ -475,6 +514,10 @@ func _draw_controls() -> void:
 	var viewport_size := get_viewport_rect().size
 	var font_size := 18
 	var y := viewport_size.y - 28.0
+	if NetworkManager.is_network_match():
+		var local_text := "YOU: %s catch" % InputConfig.action_label("p1_catch")
+		draw_string(font, Vector2(56.0, y), local_text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color(0.82, 0.9, 1.0))
+		return
 	var p1_text := "P1: %s catch" % InputConfig.action_label("p1_catch")
 	var p2_text := "P2: %s catch" % InputConfig.action_label("p2_catch")
 	var p2_width := font.get_string_size(p2_text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
@@ -484,15 +527,23 @@ func _draw_controls() -> void:
 func _draw_projectile_particles() -> void:
 	for particle in projectile_particles:
 		var progress := float(particle["life"]) / float(particle["ttl"])
-		var color: Color = particle["color"]
-		var particle_position: Vector2 = particle["position"]
-		var particle_radius: float = particle["radius"]
+		var color_value: Variant = particle.get("color", Color.WHITE)
+		var position_value: Variant = particle.get("position", Vector2.ZERO)
+		if not color_value is Color or not position_value is Vector2:
+			continue
+		var color: Color = color_value
+		var particle_position: Vector2 = position_value
+		var particle_radius := float(particle.get("radius", 2.0))
 		draw_circle(particle_position, particle_radius * (1.0 - progress), Color(color.r, color.g, color.b, 1.0 - progress))
 
 func _draw_impact_particles() -> void:
 	for particle in impact_particles:
 		var progress := float(particle["life"]) / float(particle["ttl"])
-		var color: Color = particle["color"]
-		var particle_position: Vector2 = particle["position"]
-		var particle_radius: float = particle["radius"]
+		var color_value: Variant = particle.get("color", Color.WHITE)
+		var position_value: Variant = particle.get("position", Vector2.ZERO)
+		if not color_value is Color or not position_value is Vector2:
+			continue
+		var color: Color = color_value
+		var particle_position: Vector2 = position_value
+		var particle_radius := float(particle.get("radius", 2.0))
 		draw_circle(particle_position, particle_radius * (1.0 - progress), Color(color.r, color.g, color.b, 1.0 - progress))
