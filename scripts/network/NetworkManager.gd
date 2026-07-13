@@ -2,6 +2,7 @@ extends Node
 
 signal lobby_changed()
 signal lobbies_changed()
+signal chat_changed()
 signal connection_status_changed(message: String)
 signal network_game_requested(mode_id: String)
 
@@ -16,6 +17,7 @@ var selected_mode := "ring_duel"
 var status_message := "Offline"
 var player_profiles: Dictionary = {}
 var discovered_lobbies: Array[Dictionary] = []
+var chat_messages: Array[Dictionary] = []
 var network_match_active := false
 
 var peer: ENetMultiplayerPeer
@@ -70,6 +72,7 @@ func host_lobby(mode_id: String) -> void:
 	player_profiles = {str(multiplayer.get_unique_id()): profile_name}
 	beacon_timer = 0.0
 	_set_status("Hosting LAN lobby on port %d" % GAME_PORT)
+	_add_local_chat_message("SYSTEM", "Lobby created. Waiting for players...")
 	lobby_changed.emit()
 
 func join_lobby(address: String) -> void:
@@ -85,6 +88,7 @@ func join_lobby(address: String) -> void:
 		return
 	multiplayer.multiplayer_peer = peer
 	_set_status("Connecting to %s..." % target)
+	_add_local_chat_message("SYSTEM", "Connecting to %s..." % target)
 	lobby_changed.emit()
 
 func join_discovered_lobby(index: int) -> void:
@@ -100,6 +104,8 @@ func close_lobby(message: String = "Offline") -> void:
 		peer.close()
 		peer = null
 	player_profiles.clear()
+	chat_messages.clear()
+	chat_changed.emit()
 	_set_status(message)
 	lobby_changed.emit()
 
@@ -128,6 +134,15 @@ func peer_player_id(peer_id: int) -> int:
 		return 1
 	return 2
 
+func send_chat_message(text: String) -> void:
+	var cleaned := text.strip_edges()
+	if cleaned == "" or multiplayer.multiplayer_peer == null:
+		return
+	if multiplayer.is_server():
+		_broadcast_chat_message(profile_name, cleaned)
+	else:
+		_submit_chat_message.rpc_id(1, cleaned)
+
 @rpc("any_peer", "reliable")
 func _submit_profile(display_name: String) -> void:
 	if not multiplayer.is_server():
@@ -135,6 +150,15 @@ func _submit_profile(display_name: String) -> void:
 	var sender_id: int = multiplayer.get_remote_sender_id()
 	player_profiles[str(sender_id)] = display_name.strip_edges()
 	_broadcast_lobby_state()
+	_sync_chat_history.rpc_id(sender_id, chat_messages)
+
+@rpc("any_peer", "reliable")
+func _submit_chat_message(text: String) -> void:
+	if not multiplayer.is_server():
+		return
+	var sender_id: int = multiplayer.get_remote_sender_id()
+	var sender_name := str(player_profiles.get(str(sender_id), "Player %d" % sender_id))
+	_broadcast_chat_message(sender_name, text.strip_edges())
 
 @rpc("authority", "call_local", "reliable")
 func _sync_lobby_state(profiles: Dictionary, mode_id: String) -> void:
@@ -152,14 +176,18 @@ func _on_peer_connected(peer_id: int) -> void:
 	if multiplayer.is_server():
 		player_profiles[str(peer_id)] = "Player %d" % peer_id
 		_broadcast_lobby_state()
+		_broadcast_system_chat_message("Player %d joined the lobby." % peer_id)
 
 func _on_peer_disconnected(peer_id: int) -> void:
 	if multiplayer.is_server():
+		var departing_name := str(player_profiles.get(str(peer_id), "Player %d" % peer_id))
 		player_profiles.erase(str(peer_id))
 		_broadcast_lobby_state()
+		_broadcast_system_chat_message("%s left the lobby." % departing_name)
 
 func _on_connected_to_server() -> void:
 	_set_status("Connected to lobby")
+	_add_local_chat_message("SYSTEM", "Connected to lobby.")
 	_submit_profile.rpc_id(1, profile_name)
 
 func _on_connection_failed() -> void:
@@ -171,6 +199,53 @@ func _on_server_disconnected() -> void:
 func _broadcast_lobby_state() -> void:
 	_sync_lobby_state.rpc(player_profiles, selected_mode)
 	lobby_changed.emit()
+
+func _broadcast_chat_message(sender_name: String, text: String) -> void:
+	if text == "":
+		return
+	var message: Dictionary = {
+		"sender": sender_name,
+		"text": text,
+		"system": false
+	}
+	_receive_chat_message.rpc(message)
+
+func _broadcast_system_chat_message(text: String) -> void:
+	var message: Dictionary = {
+		"sender": "SYSTEM",
+		"text": text,
+		"system": true
+	}
+	_receive_chat_message.rpc(message)
+
+func _add_local_chat_message(sender_name: String, text: String, system: bool = true) -> void:
+	chat_messages.append({
+		"sender": sender_name,
+		"text": text,
+		"system": system
+	})
+	_trim_chat_messages()
+	chat_changed.emit()
+
+@rpc("authority", "call_local", "reliable")
+func _receive_chat_message(message: Dictionary) -> void:
+	chat_messages.append(message)
+	_trim_chat_messages()
+	chat_changed.emit()
+
+@rpc("authority", "reliable")
+func _sync_chat_history(messages: Array) -> void:
+	chat_messages.clear()
+	for message in messages:
+		if message is Dictionary:
+			var typed_message: Dictionary = message
+			chat_messages.append(typed_message)
+	_trim_chat_messages()
+	chat_changed.emit()
+
+func _trim_chat_messages() -> void:
+	while chat_messages.size() > 60:
+		chat_messages.remove_at(0)
 
 func _start_discovery_listener() -> void:
 	discovery_socket = PacketPeerUDP.new()

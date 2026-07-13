@@ -21,11 +21,15 @@ var mode_select_view: Control
 var multiplayer_view: Control
 var mode_button: Button
 var multiplayer_status_label: Label
+var lobby_state_label: Label
 var lobby_list: VBoxContainer
 var player_list: VBoxContainer
+var chat_log: VBoxContainer
+var chat_input: LineEdit
 var host_button: Button
 var start_lobby_button: Button
 var direct_ip_input: LineEdit
+var multiplayer_mode_options: OptionButton
 var selected_mode := MODE_RING_DUEL
 var waiting_for_action := ""
 var keybind_buttons: Dictionary = {}
@@ -41,6 +45,7 @@ func _ready() -> void:
 	_build_multiplayer_view()
 	NetworkManager.lobby_changed.connect(_refresh_multiplayer_view)
 	NetworkManager.lobbies_changed.connect(_refresh_lobby_list)
+	NetworkManager.chat_changed.connect(_refresh_chat_log)
 	NetworkManager.connection_status_changed.connect(func(_message: String) -> void: _refresh_multiplayer_view())
 	_show_main_view()
 
@@ -216,66 +221,114 @@ func _build_multiplayer_view() -> void:
 	profile_input.focus_exited.connect(func() -> void: NetworkManager.set_profile_name(profile_input.text))
 	multiplayer_view.add_child(profile_input)
 
-	host_button = _make_menu_button("HOST LAN LOBBY")
-	host_button.position = Vector2(76.0, 310.0)
-	host_button.custom_minimum_size = Vector2(460.0, 52.0)
-	host_button.pressed.connect(func() -> void: NetworkManager.host_lobby(selected_mode))
-	multiplayer_view.add_child(host_button)
+	var mode_label := _make_option_label("Game Mode")
+	mode_label.position = Vector2(76.0, 314.0)
+	mode_label.custom_minimum_size = Vector2(160.0, 30.0)
+	multiplayer_view.add_child(mode_label)
+
+	multiplayer_mode_options = OptionButton.new()
+	multiplayer_mode_options.position = Vector2(236.0, 306.0)
+	multiplayer_mode_options.custom_minimum_size = Vector2(300.0, 38.0)
+	multiplayer_mode_options.add_item(str(MODE_NAMES[MODE_RING_DUEL]))
+	multiplayer_mode_options.set_item_metadata(0, MODE_RING_DUEL)
+	multiplayer_mode_options.add_item(str(MODE_NAMES[MODE_LED_PONG]))
+	multiplayer_mode_options.set_item_metadata(1, MODE_LED_PONG)
+	multiplayer_mode_options.item_selected.connect(_on_multiplayer_mode_selected)
+	multiplayer_view.add_child(multiplayer_mode_options)
 
 	var ip_label := _make_option_label("Direct IP")
-	ip_label.position = Vector2(76.0, 386.0)
+	ip_label.position = Vector2(76.0, 410.0)
 	ip_label.custom_minimum_size = Vector2(160.0, 30.0)
 	multiplayer_view.add_child(ip_label)
 
 	direct_ip_input = LineEdit.new()
 	direct_ip_input.placeholder_text = "Host IP, e.g. 192.168.1.25"
-	direct_ip_input.position = Vector2(236.0, 380.0)
+	direct_ip_input.position = Vector2(236.0, 404.0)
 	direct_ip_input.custom_minimum_size = Vector2(300.0, 38.0)
 	direct_ip_input.text_submitted.connect(func(_text: String) -> void: NetworkManager.join_lobby(direct_ip_input.text))
 	multiplayer_view.add_child(direct_ip_input)
 
 	var join_button := _make_menu_button("JOIN DIRECT IP")
-	join_button.position = Vector2(76.0, 432.0)
+	join_button.position = Vector2(76.0, 562.0)
 	join_button.custom_minimum_size = Vector2(460.0, 52.0)
 	join_button.pressed.connect(func() -> void: NetworkManager.join_lobby(direct_ip_input.text))
 	multiplayer_view.add_child(join_button)
 
 	multiplayer_status_label = Label.new()
-	multiplayer_status_label.position = Vector2(76.0, 500.0)
-	multiplayer_status_label.custom_minimum_size = Vector2(460.0, 32.0)
+	multiplayer_status_label.position = Vector2(622.0, 394.0)
+	multiplayer_status_label.custom_minimum_size = Vector2(520.0, 30.0)
+	multiplayer_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	multiplayer_status_label.add_theme_font_size_override("font_size", 16)
 	multiplayer_status_label.add_theme_color_override("font_color", Color(0.78, 0.8, 0.86))
 	multiplayer_view.add_child(multiplayer_status_label)
 
-	var lobby_title := _make_heading("Open LAN Lobbies", Vector2(650.0, 244.0))
-	lobby_title.custom_minimum_size = Vector2(300.0, 38.0)
+	lobby_state_label = Label.new()
+	lobby_state_label.position = Vector2(622.0, 426.0)
+	lobby_state_label.custom_minimum_size = Vector2(520.0, 32.0)
+	lobby_state_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lobby_state_label.add_theme_font_size_override("font_size", 18)
+	lobby_state_label.add_theme_color_override("font_color", Color(1.0, 0.9, 0.28))
+	multiplayer_view.add_child(lobby_state_label)
+
+	var lobby_title := _make_heading("Open LAN Lobbies", Vector2(718.0, 244.0))
+	lobby_title.custom_minimum_size = Vector2(360.0, 38.0)
 	multiplayer_view.add_child(lobby_title)
 
 	lobby_list = VBoxContainer.new()
 	lobby_list.position = Vector2(622.0, 292.0)
-	lobby_list.custom_minimum_size = Vector2(520.0, 158.0)
+	lobby_list.custom_minimum_size = Vector2(520.0, 42.0)
 	lobby_list.add_theme_constant_override("separation", 8)
 	multiplayer_view.add_child(lobby_list)
 
-	var players_title := _make_heading("Lobby Players", Vector2(650.0, 470.0))
-	players_title.custom_minimum_size = Vector2(300.0, 38.0)
+	var players_title := _make_heading("Players", Vector2(718.0, 334.0))
+	players_title.custom_minimum_size = Vector2(360.0, 32.0)
+	players_title.add_theme_font_size_override("font_size", 24)
 	multiplayer_view.add_child(players_title)
 
 	player_list = VBoxContainer.new()
-	player_list.position = Vector2(622.0, 518.0)
-	player_list.custom_minimum_size = Vector2(520.0, 92.0)
+	player_list.position = Vector2(622.0, 366.0)
+	player_list.custom_minimum_size = Vector2(520.0, 48.0)
 	player_list.add_theme_constant_override("separation", 6)
 	multiplayer_view.add_child(player_list)
 
+	var chat_title := _make_heading("Lobby Chat", Vector2(650.0, 524.0))
+	chat_title.custom_minimum_size = Vector2(300.0, 30.0)
+	chat_title.add_theme_font_size_override("font_size", 24)
+	multiplayer_view.add_child(chat_title)
+
+	chat_log = VBoxContainer.new()
+	chat_log.position = Vector2(622.0, 558.0)
+	chat_log.custom_minimum_size = Vector2(520.0, 62.0)
+	chat_log.add_theme_constant_override("separation", 2)
+	multiplayer_view.add_child(chat_log)
+
+	chat_input = LineEdit.new()
+	chat_input.position = Vector2(622.0, 624.0)
+	chat_input.custom_minimum_size = Vector2(520.0, 34.0)
+	chat_input.placeholder_text = "Type lobby chat and press Enter"
+	chat_input.text_submitted.connect(func(text: String) -> void:
+		NetworkManager.send_chat_message(text)
+		chat_input.text = ""
+	)
+	multiplayer_view.add_child(chat_input)
+
 	start_lobby_button = _make_menu_button("START LOBBY GAME")
-	start_lobby_button.position = Vector2(622.0, 620.0)
-	start_lobby_button.custom_minimum_size = Vector2(250.0, 48.0)
+	start_lobby_button.position = Vector2(622.0, 666.0)
+	start_lobby_button.custom_minimum_size = Vector2(200.0, 48.0)
 	start_lobby_button.pressed.connect(func() -> void: NetworkManager.start_game())
 	multiplayer_view.add_child(start_lobby_button)
 
+	host_button = _make_menu_button("CREATE LOBBY")
+	host_button.position = Vector2(842.0, 666.0)
+	host_button.custom_minimum_size = Vector2(214.0, 48.0)
+	host_button.add_theme_font_size_override("font_size", 14)
+	host_button.pressed.connect(func() -> void: NetworkManager.host_lobby(selected_mode))
+	multiplayer_view.add_child(host_button)
+
 	var disconnect_button := _make_menu_button("DISCONNECT")
-	disconnect_button.position = Vector2(892.0, 620.0)
-	disconnect_button.custom_minimum_size = Vector2(250.0, 48.0)
+	disconnect_button.position = Vector2(1076.0, 666.0)
+	disconnect_button.custom_minimum_size = Vector2(188.0, 48.0)
+	disconnect_button.add_theme_font_size_override("font_size", 18)
 	disconnect_button.pressed.connect(func() -> void: NetworkManager.close_lobby())
 	multiplayer_view.add_child(disconnect_button)
 
@@ -390,17 +443,50 @@ func _show_multiplayer_view() -> void:
 	options_view.visible = false
 	mode_select_view.visible = false
 	multiplayer_view.visible = true
-	NetworkManager.set_selected_mode(selected_mode)
+	if not NetworkManager.is_connected_to_lobby():
+		NetworkManager.set_selected_mode(selected_mode)
 	_refresh_multiplayer_view()
 
 func _refresh_multiplayer_view() -> void:
 	if multiplayer_status_label == null:
 		return
+	if NetworkManager.is_connected_to_lobby():
+		selected_mode = NetworkManager.selected_mode
+	_update_multiplayer_mode_option()
 	multiplayer_status_label.text = "%s | Mode: %s" % [NetworkManager.status_message, MODE_NAMES.get(NetworkManager.selected_mode, "Unknown Mode")]
+	if NetworkManager.is_hosting():
+		lobby_state_label.text = "LOBBY CREATED - YOU ARE HOSTING"
+		lobby_state_label.add_theme_color_override("font_color", Color(0.25, 1.0, 0.45))
+	elif NetworkManager.is_connected_to_lobby():
+		lobby_state_label.text = "JOINED LOBBY - WAITING FOR HOST"
+		lobby_state_label.add_theme_color_override("font_color", Color(0.35, 0.78, 1.0))
+	else:
+		lobby_state_label.text = "NO LOBBY - CREATE OR JOIN MANUALLY"
+		lobby_state_label.add_theme_color_override("font_color", Color(1.0, 0.9, 0.28))
 	start_lobby_button.disabled = not NetworkManager.is_hosting()
-	host_button.text = "HOST LAN LOBBY: %s" % MODE_NAMES.get(selected_mode, "Unknown Mode")
+	host_button.disabled = NetworkManager.is_connected_to_lobby()
+	host_button.text = "CREATE LOBBY: %s" % MODE_NAMES.get(selected_mode, "Unknown Mode")
+	multiplayer_mode_options.disabled = NetworkManager.is_connected_to_lobby() and not NetworkManager.is_hosting()
+	chat_input.editable = NetworkManager.is_connected_to_lobby()
+	chat_input.placeholder_text = "Type lobby chat and press Enter" if NetworkManager.is_connected_to_lobby() else "Join or create a lobby to chat"
 	_refresh_lobby_list()
 	_refresh_player_list()
+	_refresh_chat_log()
+
+func _on_multiplayer_mode_selected(index: int) -> void:
+	var mode_id := str(multiplayer_mode_options.get_item_metadata(index))
+	selected_mode = mode_id
+	if not NetworkManager.is_connected_to_lobby() or NetworkManager.is_hosting():
+		NetworkManager.set_selected_mode(mode_id)
+	_refresh_multiplayer_view()
+
+func _update_multiplayer_mode_option() -> void:
+	if multiplayer_mode_options == null:
+		return
+	for i in range(multiplayer_mode_options.get_item_count()):
+		if str(multiplayer_mode_options.get_item_metadata(i)) == selected_mode:
+			multiplayer_mode_options.select(i)
+			return
 
 func _refresh_lobby_list() -> void:
 	if lobby_list == null:
@@ -435,6 +521,21 @@ func _refresh_player_list() -> void:
 		var name := str(NetworkManager.player_profiles[peer_id])
 		var suffix := " (Host)" if str(peer_id) == "1" else ""
 		player_list.add_child(_make_list_label("%s%s" % [name, suffix]))
+
+func _refresh_chat_log() -> void:
+	if chat_log == null:
+		return
+	_clear_container(chat_log)
+	if NetworkManager.chat_messages.is_empty():
+		chat_log.add_child(_make_list_label("No messages yet. Say hello before the chaos starts."))
+		return
+	var start_index := maxi(0, NetworkManager.chat_messages.size() - 3)
+	for i in range(start_index, NetworkManager.chat_messages.size()):
+		var message: Dictionary = NetworkManager.chat_messages[i]
+		var sender := str(message.get("sender", "Player"))
+		var text := str(message.get("text", ""))
+		var line := "%s: %s" % [sender, text]
+		chat_log.add_child(_make_list_label(line))
 
 func _clear_container(container: Container) -> void:
 	for child in container.get_children():

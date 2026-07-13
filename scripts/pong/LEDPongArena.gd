@@ -117,7 +117,7 @@ func _process_network(delta: float) -> void:
 				audio.play_round_start()
 			_sync_pong_state_if_ready(delta)
 			queue_redraw()
-		return
+			return
 
 		network_input_axes[1] = _local_axis_for_player(1)
 		_update_paddles_with_axes(delta, _network_axis_for_player(1), _network_axis_for_player(2))
