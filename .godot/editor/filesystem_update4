@@ -3,3 +3,4 @@ res://scripts/pong/LEDPongArena.gd
 res://scripts/round/RoundManager.gd
 res://scripts/main/Main.gd
 res://scripts/ui/MainMenu.gd
+res://scripts/audio/AudioController.gd
